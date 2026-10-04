@@ -19,6 +19,9 @@ dist/
 .idea/
 .claude/
 
+# local whisper.cpp models (downloaded on the Mac, not part of the tool)
+models/
+
 # tests / runs
 *.opus
 *.ogg

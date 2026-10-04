@@ -41,6 +41,13 @@ from .decode import (
     write_batch_ingest_request,
 )
 from .session import AudioChunk, PendantSession, find_pendant
+from .sync_flow import SyncFailed, format_report, run_sync_and_transcribe
+from .transcribe import (
+    TranscribeConfigError,
+    build_whisper_cpp_engine,
+    transcribe_tree,
+    transcript_summary,
+)
 
 
 def _user_friendly(coro_factory):
@@ -1417,6 +1424,187 @@ def reset_device(address: str) -> None:
     except Exception as e:
         click.echo(f"(connection ended: {e})", err=True)
     click.echo("Sent reset_device. The device will reboot shortly.")
+
+
+def _default_library() -> str:
+    return str(Path.home() / "Pendant")
+
+
+def _resolve_model(model: Optional[str]) -> str:
+    if model:
+        return model
+    return os.environ.get("PENDANT_WHISPER_MODEL", "small")
+
+
+def run_device_sync(
+    *,
+    address: str,
+    out_path: str,
+    key_path: Optional[str],
+    push_key: bool,
+    idle: float,
+    include_logs: bool,
+) -> None:
+    """Run the existing `pendant sync` command.
+
+    Decodes .opus files and does not upload them. This wrapper has no
+    path to unpair, clear-storage, reset, or factory-reset.
+    """
+    try:
+        sync.callback(
+            address=address,
+            out_path=out_path,
+            key_path=key_path,
+            push_key=push_key,
+            idle=idle,
+            no_decode=False,
+            include_logs=include_logs,
+            upload_url=None,
+        )
+    except SystemExit as exc:
+        if exc.code not in (0, None):
+            raise click.ClickException(
+                f"pendant sync failed (exit {exc.code})."
+            ) from exc
+
+
+@main.command("transcribe")
+@click.argument("path", type=click.Path(exists=True))
+@click.option("--model", default=None,
+              help="Whisper model size (tiny, base, small, medium, "
+                   "large-v3) or a path to a ggml .bin file. "
+                   "Default: small.")
+@click.option("--language", default="en", show_default=True,
+              help="Spoken language. Use 'auto' to let whisper.cpp decide.")
+@click.option("--whisper-cli", "whisper_cli", default=None,
+              help="Path to the whisper.cpp whisper-cli program.")
+@click.option("--ffmpeg", "ffmpeg_bin", default=None,
+              help="Path to ffmpeg.")
+@click.option("--force", is_flag=True,
+              help="Transcribe again even if a transcript is already there.")
+def transcribe_cmd(
+    path: str,
+    model: Optional[str],
+    language: str,
+    whisper_cli: Optional[str],
+    ffmpeg_bin: Optional[str],
+    force: bool,
+) -> None:
+    """Write a local transcript next to each .opus recording.
+
+    Skips a recording that already has a dated .txt plus a timestamped
+    .srt and .json. Needs whisper.cpp and ffmpeg on this Mac. Does not
+    use the network and does not talk to the pendant.
+    """
+    try:
+        engine = build_whisper_cpp_engine(
+            model=_resolve_model(model),
+            binary=whisper_cli,
+            ffmpeg=ffmpeg_bin,
+            language=language,
+        )
+    except TranscribeConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    root = Path(path)
+    click.echo(f"Using whisper.cpp model {engine.model_name}.")
+    outcomes = transcribe_tree(
+        root, engine=engine, force=force, on_event=click.echo,
+    )
+    if not outcomes:
+        click.echo(f"No .opus recordings in {root}.")
+        return
+    click.echo(transcript_summary(outcomes))
+    if any(item.action == "failed" for item in outcomes):
+        sys.exit(1)
+
+
+@main.command("sync-and-transcribe")
+@click.argument("address")
+@click.option("--library", "-o", "library", default=None,
+              help="Where to save dated recordings. "
+                   "Default: ~/Pendant.")
+@click.option("--model", default=None,
+              help="Whisper model size (tiny, base, small, medium, "
+                   "large-v3) or a path to a ggml .bin file. "
+                   "Default: small.")
+@click.option("--language", default="en", show_default=True,
+              help="Spoken language. Use 'auto' to let whisper.cpp decide.")
+@click.option("--whisper-cli", "whisper_cli", default=None,
+              help="Path to the whisper.cpp whisper-cli program.")
+@click.option("--ffmpeg", "ffmpeg_bin", default=None,
+              help="Path to ffmpeg.")
+@click.option("--key", "key_path", type=click.Path(exists=True),
+              help="Server private key (PEM), if the pendant encrypts audio.")
+@click.option("--push-key", is_flag=True,
+              help="Generate a key, push the public half to the pendant, "
+                   "and save the private key in the dated folder.")
+@click.option("--idle", default=5.0, show_default=True,
+              help="Stop the download after this many quiet seconds.")
+@click.option("--include-logs", is_flag=True,
+              help="Also process COMMAND flash pages. Leave this off "
+                   "for normal recordings.")
+@click.option("--force", is_flag=True,
+              help="Transcribe again even if a transcript is already there.")
+def sync_and_transcribe_cmd(
+    address: str,
+    library: Optional[str],
+    model: Optional[str],
+    language: str,
+    whisper_cli: Optional[str],
+    ffmpeg_bin: Optional[str],
+    key_path: Optional[str],
+    push_key: bool,
+    idle: float,
+    include_logs: bool,
+    force: bool,
+) -> None:
+    """Download, file by date, and transcribe on this Mac.
+
+    Checks that whisper.cpp and the model are ready before it connects,
+    then runs the existing download and writes each recording under
+    YYYY/MM/YYYY-MM-DD/. Safe to run again: files already saved are
+    skipped, and recordings that already have a transcript are skipped.
+
+    Never unpairs, clears storage, or resets the pendant. Do not run
+    `pendant unpair`, `pendant reset`, `pendant clear-storage`, or
+    `pendant factory-reset`.
+    """
+    # Local tools first, so a missing model does not start a download.
+    try:
+        engine = build_whisper_cpp_engine(
+            model=_resolve_model(model),
+            binary=whisper_cli,
+            ffmpeg=ffmpeg_bin,
+            language=language,
+        )
+    except TranscribeConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    library_path = Path(library) if library else Path(_default_library())
+    click.echo(
+        f"Ready: whisper.cpp model {engine.model_name}. "
+        "Transcription stays on this Mac."
+    )
+    try:
+        report = run_sync_and_transcribe(
+            address=address,
+            library=library_path,
+            sync_fn=run_device_sync,
+            engine=engine,
+            key_path=key_path,
+            push_key=push_key,
+            idle=idle,
+            include_logs=include_logs,
+            force=force,
+            on_event=click.echo,
+        )
+    except SyncFailed as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(format_report(report))
+    if report.failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

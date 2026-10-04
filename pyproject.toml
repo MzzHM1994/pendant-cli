@@ -18,6 +18,7 @@ dev  = ["grpcio-tools>=1.62", "pytest>=8", "pytest-asyncio>=0.23"]
 
 [project.scripts]
 pendant = "pendant_client.cli:main"
+pendant-cli = "pendant_client.cli:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
