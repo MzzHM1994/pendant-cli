@@ -8,6 +8,21 @@ file you can play in any Opus-aware player.
 Built from static analysis of the official Android app and the firmware
 v1.1.20 image.
 
+**Keeping transcripts after Limitless shuts down:** on a Mac, this fork
+downloads the pendant and writes a local transcript next to each
+recording. Nothing is sent to a transcription service. The setup guide
+is written for someone who does not usually use a terminal:
+[README-MACOS.md](README-MACOS.md). After setup, one command does the
+download, files each recording into `YYYY/MM/YYYY-MM-DD/`, and
+transcribes it:
+
+```bash
+pendant-cli sync-and-transcribe AA:BB:CC:DD:EE:FF
+```
+
+Never run `pendant unpair`, `pendant reset`, `pendant clear-storage`,
+or `pendant factory-reset` as part of that workflow.
+
 ## Status
 
 Parsers + crypto are unit-tested with synthetic data and the full
@@ -103,6 +118,10 @@ clean-up-before-retire command, not the recover-from-strange-state one.
 
 ### Resetting the pendant
 
+If you are following [README-MACOS.md](README-MACOS.md) to keep
+recordings on your Mac, stop here. Do not run the commands in this
+section.
+
 Three levels, ordered from least to most destructive:
 
 | Command | Effect | Preserves |
@@ -134,7 +153,10 @@ client/
 │   ├── flash_page.py               # generic protobuf wire-format parser
 │   ├── crypto.py                   # ECDH-P256 + HKDF-SHA256 + AES-GCM-128
 │   ├── session.py                  # high-level: get_info, set_time, sync, …
-│   ├── cli.py                      # `pendant ...` command-line entry point
+│   ├── cli.py                      # `pendant` / `pendant-cli` commands
+│   ├── transcribe.py               # local whisper.cpp transcripts
+│   ├── archive.py                  # YYYY/MM/YYYY-MM-DD filing
+│   ├── sync_flow.py                # sync, then file, then transcribe
 │   └── proto/                      # auto-generated, .gitignore'd
 └── tests/
     ├── test_fragment_reassembly.py
